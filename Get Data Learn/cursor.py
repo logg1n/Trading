@@ -24,7 +24,7 @@ class Cursor:
       }
 
    def next_cursor(self) -> None:
-      self.curs = (self.curs + (self.time_intervals.get(self.timeframe) * self.limit) * 60 * 1000)
+      self.curs = (self.curs + (self.time_intervals.get(str(self.timeframe)) * self.limit) * 60 * 1000)
             
    def datetime_to_milliseconds(self, date_str: str, date_format: str = "%d.%m.%Y") -> int | None:
       """
