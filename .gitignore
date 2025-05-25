@@ -1,0 +1,71 @@
+.env
+../Pattern Analyser/Patterns/triangle.py
+*.pth
+data/
+
+# Игнорируем файлы, специфичные для Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Игнорируем файлы, специфичные для IDE и редакторов
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+
+# Игнорируем виртуальные окружения
+venv/
+env/
+.venv/
+ENV/
+
+# Игнорируем файлы настроек и кэша
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Игнорируем CSV-файлы
+*.csv
+
+# Игнорируем логи и временные файлы
+*.log
+*.tmp
+*.bak
+*.sqlite3
+
+# Игнорируем файлы, специфичные для macOS
+.DS_Store
+
+# Игнорируем файлы, специфичные для Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
