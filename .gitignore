@@ -1,6 +1,7 @@
 .env
 ../Pattern Analyser/Patterns/triangle.py
 *.pth
+*.json
 data/
 
 # Игнорируем файлы, специфичные для Python
