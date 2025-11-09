@@ -152,18 +152,21 @@ class AdvancedModelTrainer:
             'learning_rates': []
         }
 
-        # Конфигурация по умолчанию
+        # ОБНОВЛЕННАЯ КОНФИГУРАЦИЯ ДЛЯ ФИНАЛЬНОГО ДООБУЧЕНИЯ
         self.config = {
             'hidden_size': 128,
             'num_layers': 2,
-            'dropout': 0.3,
+            'dropout': 0.3,  # ДОБАВЛЕН DROPOUT
             'use_attention': True,
             'use_residual': True,
-            'batch_size': 64,
-            'learning_rate': 0.001,
-            'weight_decay': 1e-4,
-            'patience': 10,
-            'min_delta': 1e-4
+            'batch_size': 128,  # УВЕЛИЧЕН BATCH SIZE
+            'learning_rate': 0.0001,  # СНИЖЕН LEARNING RATE
+            'weight_decay': 1e-4,  # ДОБАВЛЕН WEIGHT DECAY
+            'patience': 15,  # УВЕЛИЧЕН PATIENCE
+            'min_delta': 1e-4,
+            'lr_scheduler': 'cosine',  # ДОБАВЛЕН LR SCHEDULING
+            'lr_patience': 10,  # PATIENCE ДЛЯ REDUCELRONPLATEAU
+            'lr_factor': 0.5  # ФАКТОР УМЕНЬШЕНИЯ LR
         }
 
         if config:
@@ -195,6 +198,40 @@ class AdvancedModelTrainer:
             device = torch.device("cpu")
             log_step("Using CPU")
         return device
+
+        # ДОБАВИМ МЕТОД ДЛЯ СОЗДАНИЯ ОПТИМИЗАТОРА И SCHEDULER
+
+    def _create_optimizer_and_scheduler(self, model_parameters, epochs: int):
+        """Создание оптимизатора и планировщика learning rate"""
+        # Оптимизатор с weight decay
+        optimizer = optim.AdamW(
+            model_parameters,
+            lr=self.config['learning_rate'],
+            weight_decay=self.config['weight_decay'],
+            betas=(0.9, 0.999),
+            eps=1e-8
+        )
+
+        # Learning rate scheduling
+        if self.config['lr_scheduler'] == 'cosine':
+            scheduler = CosineAnnealingLR(
+                optimizer,
+                T_max=epochs,
+                eta_min=self.config['learning_rate'] * 0.01  # Минимальный LR = 1% от начального
+            )
+        elif self.config['lr_scheduler'] == 'plateau':
+            scheduler = ReduceLROnPlateau(
+                optimizer,
+                mode='min',
+                patience=self.config['lr_patience'],
+                factor=self.config['lr_factor'],
+                verbose=True,
+                min_lr=self.config['learning_rate'] * 0.001  # Минимальный LR
+            )
+        else:
+            scheduler = None
+
+        return optimizer, scheduler
 
     def ensure_float32(self, tensor: torch.Tensor) -> torch.Tensor:
         """Гарантирует, что тензор имеет тип float32"""
@@ -703,19 +740,16 @@ class AdvancedModelTrainer:
             nn.BCEWithLogitsLoss(pos_weight=class_weights['correction'][1].unsqueeze(0))
         )
 
-        # Оптимизатор и планировщик
-        optimizer = optim.AdamW(
+        # СОЗДАЕМ ОПТИМИЗАТОР И SCHEDULER С НОВЫМИ ПАРАМЕТРАМИ
+        optimizer, scheduler = self._create_optimizer_and_scheduler(
             self.model.parameters(),
-            lr=self.config['learning_rate'],
-            weight_decay=self.config['weight_decay']
+            epochs
         )
-
-        scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
-        # scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
 
         best_loss = float('inf')
         patience = 0
         best_epoch = 0
+        no_improvement_epochs = 0
 
         for epoch in range(epochs):
             # Фаза обучения
@@ -764,11 +798,13 @@ class AdvancedModelTrainer:
             # Фаза валидации
             val_loss, val_metrics = self.validate_model(val_loader, criterion)
 
-            # Обновление планировщика
-            scheduler.step()
-            # scheduler.step(val_loss)
-
+            # Обновление планировщика learning rate
             current_lr = optimizer.param_groups[0]['lr']
+
+            if isinstance(scheduler, ReduceLROnPlateau):
+                scheduler.step(val_loss)
+            elif scheduler is not None:
+                scheduler.step()
 
             # Расчет метрик
             train_loss = epoch_train_loss / len(train_loader)
@@ -797,11 +833,12 @@ class AdvancedModelTrainer:
             self.training_history['val_correction_acc'].append(val_correction_acc)
             self.training_history['learning_rates'].append(current_lr)
 
-            # Early stopping и сохранение лучшей модели
+            # УЛУЧШЕННЫЙ EARLY STOPPING
             if val_loss < best_loss - self.config['min_delta']:
                 best_loss = val_loss
                 best_epoch = epoch
                 patience = 0
+                no_improvement_epochs = 0
 
                 # Сохранение модели
                 if isinstance(self.model, nn.DataParallel):
@@ -813,6 +850,13 @@ class AdvancedModelTrainer:
                 log_step(f"Модель сохранена (Val Loss: {val_loss:.4f})")
             else:
                 patience += 1
+                no_improvement_epochs += 1
+
+                # Дополнительная проверка для очень долгого отсутствия улучшений
+                if no_improvement_epochs >= self.config['patience'] * 2:
+                    log_step(f"Слишком долгое отсутствие улучшений. Прерывание обучения.")
+                    break
+
                 if patience >= self.config['patience']:
                     log_step(f"Early stopping после {epoch + 1} эпох. "
                              f"Лучшая эпоха: {best_epoch + 1} с loss: {best_loss:.4f}")
@@ -835,7 +879,7 @@ class AdvancedModelTrainer:
         }
 
     def train_on_all_data(self, initial_epochs: int = 100, incremental_epochs: int = 50) -> Dict:
-        """Улучшенный полный цикл обучения"""
+        """Улучшенный полный цикл обучения с разными LR для разных этапов"""
         try:
             data_files = self.find_data_files()
             if not data_files:
@@ -844,7 +888,7 @@ class AdvancedModelTrainer:
 
             results = {}
 
-            # Первичное обучение
+            # Первичное обучение с обычным LR
             if not MODEL_PATH.exists():
                 log_step("Инициализация нового обучения...")
                 initial_data = self.load_and_preprocess_data(data_files[0])
@@ -870,26 +914,36 @@ class AdvancedModelTrainer:
                 remaining_files = data_files
                 results['initial'] = {'status': 'loaded_existing'}
 
-            # Дообучение на остальных файлах
-            incremental_results = []
-            for i, file in enumerate(remaining_files):
-                try:
-                    log_step(f"Дообучение на файле {i + 1}/{len(remaining_files)}: {file}")
+            # ДООБУЧЕНИЕ С СНИЖЕННЫМ LEARNING RATE
+            if remaining_files:
+                log_step("Начинаем фазу дообучения с сниженным LR...")
 
-                    new_data = self.load_and_preprocess_data(file)
-                    X_new, y_new = self.prepare_sequences(new_data)
-                    train_loader, val_loader, _ = self.create_dataloaders(X_new, y_new)
+                # ВРЕМЕННО СНИЖАЕМ LEARNING RATE ДЛЯ ДООБУЧЕНИЯ
+                original_lr = self.config['learning_rate']
+                self.config['learning_rate'] = 0.00001  # ЕЩЕ НИЖЕ ДЛЯ ФИНАЛЬНОГО ДООБУЧЕНИЯ
 
-                    epoch_results = self.train_model(
-                        train_loader, val_loader, class_weights, incremental_epochs
-                    )
-                    incremental_results.append(epoch_results)
+                incremental_results = []
+                for i, file in enumerate(remaining_files):
+                    try:
+                        log_step(f"Дообучение на файле {i + 1}/{len(remaining_files)}: {file}")
 
-                except Exception as e:
-                    log_step(f"Ошибка при обработке {file}: {str(e)}", "WARNING")
-                    continue
+                        new_data = self.load_and_preprocess_data(file)
+                        X_new, y_new = self.prepare_sequences(new_data)
+                        train_loader, val_loader, _ = self.create_dataloaders(X_new, y_new)
 
-            results['incremental'] = incremental_results
+                        # ДООБУЧЕНИЕ С УМЕНЬШЕННЫМ КОЛИЧЕСТВОМ ЭПОХ И СНИЖЕННЫМ LR
+                        epoch_results = self.train_model(
+                            train_loader, val_loader, class_weights, incremental_epochs // 2
+                        )
+                        incremental_results.append(epoch_results)
+
+                    except Exception as e:
+                        log_step(f"Ошибка при обработке {file}: {str(e)}", "WARNING")
+                        continue
+
+                # ВОССТАНАВЛИВАЕМ ОРИГИНАЛЬНЫЙ LR
+                self.config['learning_rate'] = original_lr
+                results['incremental'] = incremental_results
 
             # Финальный анализ
             if initial_data is not None:
@@ -903,55 +957,6 @@ class AdvancedModelTrainer:
             log_step(f"Критическая ошибка обучения: {str(e)}", "ERROR")
             log_step(traceback.format_exc())
             return {}
-
-    def plot_training_history(self, save_path: str = "training_history.png"):
-        """Визуализация истории обучения"""
-        try:
-            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-
-            # Loss
-            ax1.plot(self.training_history['train_loss'], label='Train Loss')
-            ax1.plot(self.training_history['val_loss'], label='Val Loss')
-            ax1.set_title('Training and Validation Loss')
-            ax1.set_xlabel('Epoch')
-            ax1.set_ylabel('Loss')
-            ax1.legend()
-            ax1.grid(True)
-
-            # Trend Accuracy
-            ax2.plot(self.training_history['train_trend_acc'], label='Train Trend Acc')
-            ax2.plot(self.training_history['val_trend_acc'], label='Val Trend Acc')
-            ax2.set_title('Trend Accuracy')
-            ax2.set_xlabel('Epoch')
-            ax2.set_ylabel('Accuracy')
-            ax2.legend()
-            ax2.grid(True)
-
-            # Correction Accuracy
-            ax3.plot(self.training_history['train_correction_acc'], label='Train Correction Acc')
-            ax3.plot(self.training_history['val_correction_acc'], label='Val Correction Acc')
-            ax3.set_title('Correction Accuracy')
-            ax3.set_xlabel('Epoch')
-            ax3.set_ylabel('Accuracy')
-            ax3.legend()
-            ax3.grid(True)
-
-            # Learning Rate
-            ax4.plot(self.training_history['learning_rates'], label='Learning Rate')
-            ax4.set_title('Learning Rate Schedule')
-            ax4.set_xlabel('Epoch')
-            ax4.set_ylabel('Learning Rate')
-            ax4.legend()
-            ax4.grid(True)
-
-            plt.tight_layout()
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
-
-            log_step(f"Графики обучения сохранены в {save_path}")
-
-        except Exception as e:
-            log_step(f"Ошибка построения графиков: {str(e)}", "WARNING")
 
     def test_model(self, test_path: str) -> Dict:
         """Расширенное тестирование модели"""
@@ -1135,7 +1140,6 @@ if __name__ == "__main__":
             initial_epochs=args.epochs,
             incremental_epochs=args.epochs // 2
         )
-        trainer.plot_training_history()
 
     elif args.mode == "test":
         test_results = trainer.test_model(TEST_DATA)
